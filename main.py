@@ -289,9 +289,6 @@ class Game:
                     npc.seek(next_waypoint)
                     
                     # Update position based on velocity
-                    npc.update_position()
-                    
-                    # Update physical position in grid
                     new_pos = npc.update_position()
                     if new_pos:
                         new_x, new_y = new_pos
@@ -302,35 +299,40 @@ class Game:
                             self.grid[new_x][new_y] != EntityType.BUILDING and
                             self.grid[new_x][new_y] != EntityType.PLAYER):
                             
-                            # Update grid
-                            self.grid[npc.x][npc.y] = EntityType.EMPTY
+                            # Remember if current position is a hospital before moving
+                            is_current_hospital = False
+                            for hospital in self.hospitals:
+                                if hospital.x == npc.x and hospital.y == npc.y:
+                                    is_current_hospital = True
+                                    break
+                            
+                            # Update grid - clear old position or restore hospital
+                            if is_current_hospital:
+                                self.grid[npc.x][npc.y] = EntityType.HOSPITAL
+                            else:
+                                self.grid[npc.x][npc.y] = EntityType.EMPTY
+                            
+                            # Update NPC position
                             npc.x, npc.y = new_x, new_y
                             
                             # If we've reached the next waypoint, remove it from the path
                             if npc.x == npc.path[0][0] and npc.y == npc.path[0][1]:
                                 npc.path.pop(0)
                             
-                            # Check if reached hospital
-                            if self.grid[npc.x][npc.y] == EntityType.HOSPITAL:
-                                print("Wosil")
+                            # Check if reached hospital - ONLY do this check once
+                            is_at_hospital = False
+                            for hospital in self.hospitals:
+                                if hospital.x == npc.x and hospital.y == npc.y:
+                                    is_at_hospital = True
+                                    break
+                            
+                            if is_at_hospital and npc.carrying_victim:
                                 npc.carrying_victim = False
                                 self.rescued_count += 1
                                 npc.path = []  # Clear the path
                                 npc.state = EntityState.GOING_TO_VICTIM
-                            old_cell_type = self.grid[npc.x][npc.y]
-                            is_on_hospital = old_cell_type == EntityType.HOSPITAL
-                            self.grid[npc.x][npc.y] = EntityType.EMPTY if not is_on_hospital else EntityType.HOSPITAL
-
-                            # Then at the end, update the check for reaching hospital
-                            original_cell_type = self.grid[new_x][new_y]
-                            is_hospital = original_cell_type == EntityType.HOSPITAL
-
-                            # Check if reached hospital
-                            if is_hospital:
-                                npc.carrying_victim = False
-                                self.rescued_count += 1
-                                npc.path = []  # Clear the path
-                                npc.state = EntityState.GOING_TO_VICTIM
+                            
+                            # Update grid with new NPC position
                             self.grid[npc.x][npc.y] = EntityType.NPC
         else:
             # Set state to looking for victims
