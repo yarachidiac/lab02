@@ -396,8 +396,12 @@ class Game:
             self.grid[new_x][new_y] != EntityType.BUILDING and
             self.grid[new_x][new_y] != EntityType.NPC):
             
-            # Check if destination is a hospital
-            is_destination_hospital = self.grid[new_x][new_y] == EntityType.HOSPITAL
+            # Check if destination is a hospital - use the hospitals list for consistency
+            is_destination_hospital = False
+            for hospital in self.hospitals:
+                if hospital.x == new_x and hospital.y == new_y:
+                    is_destination_hospital = True
+                    break
             
             # Check if current position is a hospital
             is_current_hospital = False
@@ -477,7 +481,35 @@ class Game:
         # Draw victims
         for victim in self.victims:
             victim.draw(self.screen)
-        
+        if self.npc.path:
+            path_color = (100, 200, 255)  # Light blue color for path
+            
+            # Draw lines connecting path points
+            start_x, start_y = self.npc.x, self.npc.y
+            
+            # Draw all path segments
+            for point in self.npc.path:
+                end_x, end_y = point
+                
+                # Draw path point (small circle)
+                pygame.draw.circle(
+                    self.screen, 
+                    path_color,
+                    (end_x * GRID_SIZE + GRID_SIZE//2, end_y * GRID_SIZE + GRID_SIZE//2),
+                    5
+                )
+                
+                # Draw line from previous point to this point
+                pygame.draw.line(
+                    self.screen,
+                    path_color,
+                    (start_x * GRID_SIZE + GRID_SIZE//2, start_y * GRID_SIZE + GRID_SIZE//2),
+                    (end_x * GRID_SIZE + GRID_SIZE//2, end_y * GRID_SIZE + GRID_SIZE//2),
+                    2
+                )
+                
+                # Update start for next segment
+                start_x, start_y = end_x, end_y
         # Draw NPC
         self.npc.draw(self.screen)
         
