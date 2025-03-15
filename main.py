@@ -1,517 +1,520 @@
 import pygame
-import math
-import random
 from enum import Enum
-from typing import List, Tuple, Optional
 
-# Initialize pygame
-pygame.init()
-
-# Screen dimensions and setup
-WIDTH, HEIGHT = 1000, 800
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("City Rescue Simulation")
-clock = pygame.time.Clock()
-
-# Colors
+# Constants
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+GRID_SIZE = 40  # Increased grid size for easier control
+BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
-BLACK = (20, 20, 20)
-RED = (231, 76, 60)
-BLUE = (52, 152, 219)
-GREEN = (46, 204, 113)
-GRAY = (149, 165, 166)
-YELLOW = (241, 196, 15)
-PURPLE = (155, 89, 182)
-BROWN = (139, 69, 19)
+RED = (255, 0, 0)     # Victims
+GREEN = (0, 255, 0)   # Player
+BLUE = (0, 0, 255)    # NPC
+YELLOW = (255, 255, 0)  # Hospitals
+GRAY = (128, 128, 128)  # Buildings
 
-# City grid configuration
-GRID_SIZE = 50
-COLS = WIDTH // GRID_SIZE
-ROWS = HEIGHT // GRID_SIZE
+def normalize(vector):
+    """Normalize a vector (make it length 1)"""
+    if vector.length() > 0:
+         return vector.normalize()
+    return vector
 
-class RescueState(Enum):
-    SEEKING_VICTIM = 1
-    MOVING_TO_HOSPITAL = 2
+class EntityType(Enum):
+    EMPTY = 0
+    BUILDING = 1
+    VICTIM = 2
+    HOSPITAL = 3
+    PLAYER = 4
+    NPC = 5
 
-class GameObject:
-    def __init__(self, x: float, y: float, color: Tuple[int, int, int], radius: int = 10):
-        self.position = pygame.Vector2(x, y)
+class EntityState(Enum):
+    IDLE = 0
+    GOING_TO_VICTIM = 1
+    CARRYING_VICTIM = 2
+    GOING_TO_HOSPITAL = 3
+
+class Entity:
+    def __init__(self, x, y, entity_type, color):
+        self.x = x
+        self.y = y
+        self.type = entity_type
         self.color = color
-        self.radius = radius
-        self.is_active = True
-
-    def draw(self, screen):
-        if self.is_active:
-            pygame.draw.circle(screen, self.color, (int(self.position.x), int(self.position.y)), self.radius)
-
-class Obstacle(GameObject):
-    def __init__(self, x: float, y: float, width: int, height: int):
-        super().__init__(x, y, BROWN)
-        self.width = width
-        self.height = height
-        self.rect = pygame.Rect(x - width/2, y - height/2, width, height)
-
-    def draw(self, screen):
-        if self.is_active:
-            pygame.draw.rect(screen, self.color, self.rect)
-            
-    def update_rect(self):
-        self.rect = pygame.Rect(
-            self.position.x - self.width/2, 
-            self.position.y - self.height/2, 
-            self.width, 
-            self.height
-        )
-
-class Hospital(GameObject):
-    def __init__(self, x: float, y: float):
-        super().__init__(x, y, GREEN, 20)
-        self.rect = pygame.Rect(x - 20, y - 20, 40, 40)
-
-    def draw(self, screen):
-        if self.is_active:
-            pygame.draw.circle(screen, self.color, (int(self.position.x), int(self.position.y)), self.radius)
-            # Add a cross to make the hospital more recognizable
-            pygame.draw.line(screen, WHITE, 
-                            (self.position.x - 10, self.position.y),
-                            (self.position.x + 10, self.position.y), 3)
-            pygame.draw.line(screen, WHITE, 
-                            (self.position.x, self.position.y - 10),
-                            (self.position.x, self.position.y + 10), 3)
-
-class Victim(GameObject):
-    def __init__(self, x: float, y: float):
-        super().__init__(x, y, RED, 8)
-        self.blink_timer = 0
-        self.blink_rate = 30  # Frames between blinks
-    
-    def draw(self, screen):
-        if self.is_active:
-            # Make victims blink to attract attention
-            self.blink_timer = (self.blink_timer + 1) % self.blink_rate
-            if self.blink_timer < self.blink_rate * 0.8:
-                pygame.draw.circle(screen, self.color, (int(self.position.x), int(self.position.y)), self.radius)
-            else:
-                pygame.draw.circle(screen, YELLOW, (int(self.position.x), int(self.position.y)), self.radius)
-
-class Rescuer(GameObject):
-    def __init__(self, x: float, y: float, color: Tuple[int, int, int], is_player: bool = False):
-        super().__init__(x, y, color, 12)
+        self.carrying_victim = False
+        self.state = EntityState.IDLE
+        self.path = []
+        self.target = None
+        self.position = pygame.Vector2(x * GRID_SIZE + GRID_SIZE//2, y * GRID_SIZE + GRID_SIZE//2)
         self.velocity = pygame.Vector2(0, 0)
-        self.acceleration = pygame.Vector2(0, 0)
-        self.max_speed = 4 if is_player else 3  # NPC slightly slower
-        self.max_force = 0.5
-        self.carried_victim: Optional[Victim] = None
-        self.current_state = RescueState.SEEKING_VICTIM
-        self.is_player = is_player
-        self.target_victim: Optional[Victim] = None
-        self.rect = pygame.Rect(x - 12, y - 12, 24, 24)
-        self.path_timer = 0
-        self.stuck_timer = 0
-        self.last_positions = []
-
-    def apply_force(self, force: pygame.Vector2):
-        self.acceleration += force
-
-    def seek(self, target: pygame.Vector2) -> None:
-        desired = target - self.position
-        if desired.length() > 0:
-            desired = desired.normalize() * self.max_speed
-            steer = desired - self.velocity
-            if steer.length() > self.max_force:
-                steer = steer.normalize() * self.max_force
-            self.apply_force(steer)
-
-    def avoid_obstacles(self, obstacles: List[Obstacle], look_ahead: float = 100) -> None:
-        # Only apply obstacle avoidance if we're moving
-        if self.velocity.length() < 0.1:
-            return
-            
-        # Calculate the look-ahead position based on our current velocity
-        velocity_dir = self.velocity.normalize()
+        self.max_speed = 5.0  # Adjust as needed
+        self.max_force = 0.5  # Adjust as needed
+    
+    def seek(self, target):
+        """Apply seek steering behavior towards target position"""
+        # Convert grid target to pixel position
+        target_position = pygame.Vector2(target[0] * GRID_SIZE + GRID_SIZE//2, 
+                                        target[1] * GRID_SIZE + GRID_SIZE//2)
         
-        # Check for multiple angles to better detect obstacles
-        angles = [0, 15, -15, 30, -30]
-        for angle in angles:
-            # Rotate velocity direction by this angle
-            rads = math.radians(angle)
-            rotated_dir = pygame.Vector2(
-                velocity_dir.x * math.cos(rads) - velocity_dir.y * math.sin(rads),
-                velocity_dir.x * math.sin(rads) + velocity_dir.y * math.cos(rads)
-            )
-            
-            future_pos = self.position + rotated_dir * look_ahead
-            
-            # Check for potential collisions with obstacles
-            for obstacle in obstacles:
-                # Check if our look-ahead position is inside any obstacle
-                if obstacle.rect.collidepoint(future_pos):
-                    # Calculate avoidance vector (perpendicular to velocity)
-                    # This creates a more natural steering around obstacles
-                    perp_dir = pygame.Vector2(-velocity_dir.y, velocity_dir.x)
-                    
-                    # Determine which side to avoid to (left or right of obstacle)
-                    to_obstacle = obstacle.position - self.position
-                    side_dot = perp_dir.dot(to_obstacle)
-                    if side_dot < 0:
-                        perp_dir = -perp_dir
-                        
-                    # Apply stronger force when closer to obstacle
-                    dist_factor = 1.0 - min(1.0, self.position.distance_to(obstacle.position) / (look_ahead * 1.5))
-                    avoid_force = perp_dir * self.max_force * 3 * (dist_factor + 0.5)
-                    self.apply_force(avoid_force)
-                    return
-
-    def update(self, victims: List[Victim], hospitals: List[Hospital], obstacles: List[Obstacle]) -> None:
-        # Track position history to detect being stuck
-        self.last_positions.append(pygame.Vector2(self.position))
-        if len(self.last_positions) > 30:  # Track last 30 frames
-            self.last_positions.pop(0)
+        desired = target_position - self.position
         
-        # Update position and movement
-        self.velocity += self.acceleration
+        # If we're very close, slow down (arrival behavior)
+        distance = desired.length()
+        if distance < GRID_SIZE:
+            # Scale by distance for smoother arrival
+            desired = normalize(desired) * self.max_speed * (distance / GRID_SIZE)
+        else:
+            desired = normalize(desired) * self.max_speed
+        
+        steering = desired - self.velocity  # Compute steering force
+        steering = normalize(steering) * min(self.max_force, steering.length())  # Limit force
+        
+        self.apply_force(steering)
+
+    # Add this method to your Entity class
+    def apply_force(self, force):
+        """Apply a force to the entity, updating its velocity"""
+        self.velocity += force
         if self.velocity.length() > self.max_speed:
-            self.velocity = self.velocity.normalize() * self.max_speed
-        
-        # Store old position to check for collisions
-        old_position = pygame.Vector2(self.position)
-        
-        # Update position
+            self.velocity = normalize(self.velocity) * self.max_speed
+
+    # Add this method to your Entity class
+    def update_position(self):
+        """Update entity position based on velocity"""
         self.position += self.velocity
-        self.acceleration *= 0
         
-        # Update rect for collision detection
-        self.rect.center = (self.position.x, self.position.y)
+        # Update grid position based on pixel position
+        new_grid_x = int(self.position.x // GRID_SIZE)
+        new_grid_y = int(self.position.y // GRID_SIZE)
         
-        # Check for collisions with obstacles
-        collision_occurred = False
-        for obstacle in obstacles:
-            if self.rect.colliderect(obstacle.rect):
-                collision_occurred = True
-                # Move back slightly and adjust direction
-                self.position -= self.velocity * 2  # Move back slightly
-                self.velocity *= -0.3  # Reduce velocity but don't stop completely
-                
-                # Find an alternative direction
-                avoidance_force = pygame.Vector2(random.uniform(-1, 1), random.uniform(-1, 1)).normalize() * self.max_force * 2
-                self.apply_force(avoidance_force)
-                break
-        
-        # Keep within bounds
-        self.position.x = max(self.radius, min(WIDTH - self.radius, self.position.x))
-        self.position.y = max(self.radius, min(HEIGHT - self.radius, self.position.y))
-        self.rect.center = (self.position.x, self.position.y)
-
-        # Handle victim collection and hospital logic for player
-        if self.is_player:
-            self.update_player_mission(victims, hospitals)
-        else:
-            self.update_ai_behavior(victims, hospitals, obstacles)
-
-        # Update carried victim position
-        if self.carried_victim:
-            self.carried_victim.position = self.position + pygame.Vector2(0, -20)
-            
-        # Check if NPC is stuck
-        if not self.is_player and len(self.last_positions) >= 30:
-            max_dist = max(self.last_positions[i].distance_to(self.last_positions[j]) 
-                        for i in range(len(self.last_positions)) 
-                        for j in range(i+1, len(self.last_positions)))
-
-            if max_dist < 30:  # If NPC has not moved much
-                self.stuck_timer += 1
-                if self.stuck_timer > 60:  # Stuck for more than 1 second
-                    unstuck_force = pygame.Vector2(random.uniform(-1, 1), random.uniform(-1, 1)).normalize() * self.max_force * 5
-                    self.apply_force(unstuck_force)
-                    self.stuck_timer = 0  # Reset timer
-            else:
-                self.stuck_timer = 0
-
-
-    def update_player_mission(self, victims: List[Victim], hospitals: List[Hospital]) -> None:
-        if self.current_state == RescueState.SEEKING_VICTIM:
-            # Check if near any victim
-            for victim in victims:
-                if victim.is_active and self.position.distance_to(victim.position) < 20:
-                    self.pick_up_victim(victim)
-                    self.current_state = RescueState.MOVING_TO_HOSPITAL
-                    break
-        
-        elif self.current_state == RescueState.MOVING_TO_HOSPITAL:
-            # Check if near any hospital
-            for hospital in hospitals:
-                if self.position.distance_to(hospital.position) < 30:
-                    self.drop_off_victim()
-                    self.current_state = RescueState.SEEKING_VICTIM
-                    break
-
-    def update_ai_behavior(self, victims: List[Victim], hospitals: List[Hospital], obstacles: List[Obstacle]) -> None:
-        # Apply obstacle avoidance
-        self.avoid_obstacles(obstacles)
-        
-        # Update pathfinding timer
-        self.path_timer += 1
-        
-        if self.current_state == RescueState.SEEKING_VICTIM:
-            # Reconsider target victim periodically or if current target is gone
-            if not self.target_victim or not self.target_victim.is_active or self.path_timer >= 120:
-                self.choose_new_victim(victims)
-                self.path_timer = 0
-            
-            if self.target_victim:
-                # Apply stronger force to ensure movement
-                target_dir = (self.target_victim.position - self.position)
-                if target_dir.length() > 0:
-                    target_dir = target_dir.normalize() * self.max_force * 2
-                    self.apply_force(target_dir)
-                
-                # Check if reached victim
-                if self.position.distance_to(self.target_victim.position) < 20:
-                    self.pick_up_victim(self.target_victim)
-                    self.current_state = RescueState.MOVING_TO_HOSPITAL
-                    self.path_timer = 0
-        
-        elif self.current_state == RescueState.MOVING_TO_HOSPITAL:
-            # Find nearest hospital
-            if len(hospitals) > 0:
-                nearest_hospital = min(hospitals, key=lambda h: self.position.distance_to(h.position))
-                
-                # Apply stronger force to ensure movement
-                hospital_dir = (nearest_hospital.position - self.position)
-                if hospital_dir.length() > 0:
-                    hospital_dir = hospital_dir.normalize() * self.max_force * 2
-                    self.apply_force(hospital_dir)
-                
-                # Check if reached hospital
-                if self.position.distance_to(nearest_hospital.position) < 30:
-                    self.drop_off_victim()
-                    self.current_state = RescueState.SEEKING_VICTIM
-                    self.path_timer = 0
-
-    def choose_new_victim(self, victims: List[Victim]) -> None:
-        active_victims = [v for v in victims if v.is_active]
-        if active_victims:
-            # Simple planning: choose the nearest victim
-            self.target_victim = min(active_victims, key=lambda v: self.position.distance_to(v.position))
-        else:
-            self.target_victim = None
-
-    def pick_up_victim(self, victim: Victim) -> None:
-        self.carried_victim = victim
-        victim.is_active = False  # Hide from world but keep tracking it with rescuer
-
-    def drop_off_victim(self) -> None:
-        if self.carried_victim:
-            self.carried_victim.is_active = False  # Permanently deactivate
-            self.carried_victim = None
+        # Return the new grid coordinates if they've changed
+        if new_grid_x != self.x or new_grid_y != self.y:
+            return new_grid_x, new_grid_y
+        return None
 
     def draw(self, screen):
-        if self.is_active:
-            pygame.draw.circle(screen, self.color, (int(self.position.x), int(self.position.y)), self.radius)
-            # Draw direction indicator
-            if self.velocity.length() > 0:
-                direction = self.velocity.normalize() * (self.radius + 5)
-                pygame.draw.line(screen, WHITE, 
-                                self.position, 
-                                self.position + direction, 2)
-            
-            # Draw different state indicators
-            if self.current_state == RescueState.SEEKING_VICTIM:
-                # Draw a question mark above when seeking
-                font = pygame.font.Font(None, 20)
-                text = font.render("?", True, WHITE)
-                text_rect = text.get_rect(center=(self.position.x, self.position.y - 25))
-                screen.blit(text, text_rect)
-            elif self.current_state == RescueState.MOVING_TO_HOSPITAL and self.carried_victim:
-                # Draw a plus sign when carrying victim
-                pygame.draw.line(screen, WHITE, 
-                                (self.position.x, self.position.y - 30),
-                                (self.position.x, self.position.y - 20), 2)
-                pygame.draw.line(screen, WHITE, 
-                                (self.position.x - 5, self.position.y - 25),
-                                (self.position.x + 5, self.position.y - 25), 2)
+        pygame.draw.rect(screen, self.color, 
+                         (self.x * GRID_SIZE, self.y * GRID_SIZE, 
+                          GRID_SIZE, GRID_SIZE))
+        
+        # Draw a smaller rect if carrying a victim
+        if self.carrying_victim:
+            victim_color = RED
+            pygame.draw.rect(screen, victim_color, 
+                            (self.x * GRID_SIZE + GRID_SIZE//4, 
+                             self.y * GRID_SIZE + GRID_SIZE//4, 
+                             GRID_SIZE//2, GRID_SIZE//2))
 
 class Game:
     def __init__(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        pygame.display.set_caption("Simple Rescue Mission")
+        self.clock = pygame.time.Clock()
+        self.grid_width = SCREEN_WIDTH // GRID_SIZE
+        self.grid_height = SCREEN_HEIGHT // GRID_SIZE
+        
+        # Initialize grid
+        self.grid = [[EntityType.EMPTY for _ in range(self.grid_height)] 
+                    for _ in range(self.grid_width)]
+        
+        # Entity lists
+        self.buildings = []
         self.victims = []
         self.hospitals = []
-        self.obstacles = []
-        self.player = Rescuer(WIDTH//4, HEIGHT//4, BLUE, True)
-        self.npc = Rescuer(WIDTH//2, HEIGHT//2, YELLOW, False)
+        self.player = None
+        self.npc = None
+        
+        self.running = True
         self.rescued_count = 0
-        self.setup_world()
-        self.font = pygame.font.Font(None, 36)
-
-    def setup_world(self):
-        # Create hospitals in fixed positions
-        self.hospitals = [
-            Hospital(WIDTH//4, HEIGHT//4),
-            Hospital(3*WIDTH//4, 3*HEIGHT//4)
-        ]
-
-        # Create fixed obstacles (buildings, barricades, etc.)
-        self.obstacles = [
-            # Large buildings
-            Obstacle(200, 150, 80, 100),   # Downtown area
-            Obstacle(350, 200, 90, 80),    # Office building
-            Obstacle(500, 350, 100, 90),   # Shopping mall
-            Obstacle(700, 200, 85, 95),    # Apartment complex
-            Obstacle(800, 500, 90, 100),   # Warehouse
-            Obstacle(250, 600, 100, 80),   # Factory
-            Obstacle(650, 650, 80, 70),    # Community center
-            Obstacle(450, 750, 90, 60),    # School
-            
-            # Medium obstacles
-            Obstacle(150, 400, 50, 60),    # Small shop
-            Obstacle(300, 350, 55, 45),    # Convenience store
-            Obstacle(650, 400, 40, 70),    # Bus station
-            Obstacle(450, 550, 60, 50),    # Gas station
-            Obstacle(850, 300, 45, 65),    # Pharmacy
-            
-            # Small obstacles/debris
-            Obstacle(400, 100, 30, 30),    # Fallen tree
-            Obstacle(550, 200, 25, 35),    # Debris pile
-            Obstacle(250, 500, 35, 25),    # Damaged car
-            Obstacle(600, 550, 30, 30),    # Road barricade
-            Obstacle(750, 400, 25, 25),    # Small debris
-            Obstacle(350, 650, 20, 40),    # Damaged pole
-            Obstacle(500, 450, 30, 20)     # Small barrier
+        self.total_victims = 0
+        
+        # Set up fixed layout
+        self.setup_fixed_layout()
+    
+    def setup_fixed_layout(self):
+        # Define fixed positions for buildings in a simple maze-like pattern
+        building_positions = [
+            # Horizontal walls
+            (2, 2), (3, 2), (4, 2), (5, 2), (6, 2),
+            (10, 2), (11, 2), (12, 2), (13, 2), (14, 2),
+            (2, 7), (3, 7), (4, 7), (5, 7), (6, 7),
+            (10, 7), (11, 7), (12, 7), (13, 7), (14, 7),
+            (2, 12), (3, 12), (4, 12), (5, 12), (6, 12),
+            # Vertical walls
+            (8, 1), (8, 2), (8, 3), (8, 4), (8, 5),
+            (8, 9), (8, 10), (8, 11), (8, 12), (8, 13)
         ]
         
-        # Ensure obstacles don't overlap with hospitals
-        for obstacle in self.obstacles[:]:
-            for hospital in self.hospitals:
-                if obstacle.rect.colliderect(hospital.rect) or \
-                   obstacle.position.distance_to(hospital.position) < 80:
-                    # Instead of removing, adjust the position slightly
-                    obstacle.position += pygame.Vector2(80, 0)
-                    obstacle.update_rect()
-
-        # Ensure player and NPC starting positions are clear
-        for obstacle in self.obstacles[:]:
-            if obstacle.rect.collidepoint(self.player.position.x, self.player.position.y) or \
-               obstacle.rect.collidepoint(self.npc.position.x, self.npc.position.y) or \
-               obstacle.position.distance_to(self.player.position) < 50 or \
-               obstacle.position.distance_to(self.npc.position) < 50:
-                # Instead of removing, adjust the position slightly
-                obstacle.position += pygame.Vector2(0, 80)
-                obstacle.update_rect()
-
-        # Create victims in fixed positions (not inside obstacles)
+        # Create buildings at fixed positions
+        for x, y in building_positions:
+            if 0 <= x < self.grid_width and 0 <= y < self.grid_height:
+                self.grid[x][y] = EntityType.BUILDING
+                building = Entity(x, y, EntityType.BUILDING, GRAY)
+                self.buildings.append(building)
+        
+        # Define fixed positions for victims
         victim_positions = [
-            (120, 200), (450, 150), (750, 150), (850, 350),
-            (100, 650), (350, 550), (650, 100), (800, 700),
-            (180, 340), (550, 600), (300, 750), (600, 300)
-        ]
+        (3, 4), (12, 4), (3, 10), (12, 10),  # Original victims
+        # Add more victims:
+        (14, 5), (5, 5)
+    
+    ]
+        self.total_victims = len(victim_positions)
         
-        self.victims = []
-        for pos in victim_positions:
-            x, y = pos
-            position = pygame.Vector2(x, y)
-            
-            # Check it's not inside an obstacle
-            if not any(obstacle.rect.collidepoint(x, y) for obstacle in self.obstacles):
-                self.victims.append(Victim(x, y))
-            else:
-                # Find a nearby safe position
-                for offset_x in range(-100, 100, 20):
-                    for offset_y in range(-100, 100, 20):
-                        new_x, new_y = x + offset_x, y + offset_y
-                        if (0 < new_x < WIDTH and 0 < new_y < HEIGHT and
-                            not any(obstacle.rect.collidepoint(new_x, new_y) for obstacle in self.obstacles)):
-                            self.victims.append(Victim(new_x, new_y))
-                            break
-                    else:
-                        continue
-                    break
-
-    def handle_player_input(self):
-        keys = pygame.key.get_pressed()
-        move_dir = pygame.Vector2(0, 0)
+        # Create victims at fixed positions
+        for x, y in victim_positions:
+            if 0 <= x < self.grid_width and 0 <= y < self.grid_height:
+                self.grid[x][y] = EntityType.VICTIM
+                victim = Entity(x, y, EntityType.VICTIM, RED)
+                self.victims.append(victim)
         
-        if keys[pygame.K_LEFT]:
-            move_dir.x = -1
-        if keys[pygame.K_RIGHT]:
-            move_dir.x = 1
-        if keys[pygame.K_UP]:
-            move_dir.y = -1
-        if keys[pygame.K_DOWN]:
-            move_dir.y = 1
-            
-        if move_dir.length() > 0:
-            move_dir = move_dir.normalize() * self.player.max_force * 2  # Increased force for better control
-            self.player.apply_force(move_dir)
-
-    def update(self):
-        self.handle_player_input()
-        self.player.update(self.victims, self.hospitals, self.obstacles)
-        self.npc.update(self.victims, self.hospitals, self.obstacles)
+        # Define fixed positions for hospitals
+        hospital_positions = [(1, 1), (17, 1), (1, 13), (17, 13)]
         
-        # Count rescued victims
-        active_victims = sum(1 for v in self.victims if v.is_active or v == self.player.carried_victim or v == self.npc.carried_victim)
-        total_victims = len(self.victims)
-        self.rescued_count = total_victims - active_victims
-
-    def draw(self):
-        # Clear screen
-        screen.fill(BLACK)
+        # Create hospitals at fixed positions
+        for x, y in hospital_positions:
+            if 0 <= x < self.grid_width and 0 <= y < self.grid_height:
+                self.grid[x][y] = EntityType.HOSPITAL
+                hospital = Entity(x, y, EntityType.HOSPITAL, YELLOW)
+                self.hospitals.append(hospital)
         
-        # Draw city grid
-        for x in range(0, WIDTH, GRID_SIZE):
-            pygame.draw.line(screen, GRAY, (x, 0), (x, HEIGHT), 1)
-        for y in range(0, HEIGHT, GRID_SIZE):
-            pygame.draw.line(screen, GRAY, (0, y), (WIDTH, y), 1)
+        # Fixed position for player and NPC
+        player_pos = (2, 5)
+        npc_pos = (13, 5)
+        
+        # Create player
+        self.grid[player_pos[0]][player_pos[1]] = EntityType.PLAYER
+        self.player = Entity(player_pos[0], player_pos[1], EntityType.PLAYER, GREEN)
+        
+        # Create NPC
+        self.grid[npc_pos[0]][npc_pos[1]] = EntityType.NPC
+        self.npc = Entity(npc_pos[0], npc_pos[1], EntityType.NPC, BLUE)
+        # Set initial state for NPC
+        self.npc.state = EntityState.GOING_TO_VICTIM
 
-        # Draw game objects
-        for obstacle in self.obstacles:
-            obstacle.draw(screen)
-        for hospital in self.hospitals:
-            hospital.draw(screen)
+    def get_nearest_victim(self, entity):
+        if not self.victims:
+            return None
+        
+        nearest_victim = None
+        nearest_distance = float('inf')
+        
         for victim in self.victims:
-            victim.draw(screen)
-        self.npc.draw(screen)
-        self.player.draw(screen)
+            distance = abs(entity.x - victim.x) + abs(entity.y - victim.y)  # Manhattan distance
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_victim = victim
+        
+        return nearest_victim
+    
+    def get_nearest_hospital(self, entity):
+        nearest_hospital = None
+        nearest_distance = float('inf')
+        
+        for hospital in self.hospitals:
+            distance = abs(entity.x - hospital.x) + abs(entity.y - hospital.y)  # Manhattan distance
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_hospital = hospital
+        
+        return nearest_hospital
 
-        # Draw game status
-        active_victims = sum(1 for v in self.victims if v.is_active)
-        rescuing_victims = (1 if self.player.carried_victim else 0) + (1 if self.npc.carried_victim else 0)
-        remaining = active_victims + rescuing_victims
+    
+    def bfs_pathfinding(self, start_x, start_y, target_x, target_y):
+        """
+        Breadth-First Search pathfinding algorithm to find shortest path
+        Returns a list of (x, y) tuples representing the path from start to target
+        """
+        # Queue of positions to check, starting with the initial position
+        queue = [(start_x, start_y)]
+        # Dictionary to keep track of visited positions and their parents
+        visited = {(start_x, start_y): None}
         
-        # Status text
-        text = self.font.render(f'Remaining Victims: {remaining}', True, WHITE)
-        screen.blit(text, (10, 10))
+        # Possible movement directions: up, right, down, left
+        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
         
-        text = self.font.render(f'Rescued: {self.rescued_count}', True, GREEN)
-        screen.blit(text, (10, 50))
+        while queue:
+            current_x, current_y = queue.pop(0)
+            
+            # If we've reached the target, reconstruct and return the path
+            if current_x == target_x and current_y == target_y:
+                path = []
+                current_pos = (current_x, current_y)
+                
+                # Reconstruct path from target to start
+                while current_pos != (start_x, start_y):
+                    path.append(current_pos)
+                    current_pos = visited[current_pos]
+                    
+                # Reverse to get path from start to target
+                path.reverse()
+                return path
+            
+            # Check all four adjacent cells
+            for dx, dy in directions:
+                next_x, next_y = current_x + dx, current_y + dy
+                
+                # Check if the next position is valid and not visited
+                if (0 <= next_x < self.grid_width and 
+                    0 <= next_y < self.grid_height and 
+                    self.grid[next_x][next_y] != EntityType.BUILDING and
+                    (next_x, next_y) not in visited):
+                    
+                    # Add to queue and mark as visited with parent reference
+                    queue.append((next_x, next_y))
+                    visited[(next_x, next_y)] = (current_x, current_y)
         
-        # Player status
-        if self.player.current_state == RescueState.SEEKING_VICTIM:
-            status = "Mission: Find victims"
+        # If no path is found, return empty list
+        return []
+
+    def update_npc(self):
+        npc = self.npc
+        
+        # If NPC is carrying a victim, go to nearest hospital
+        if npc.carrying_victim:
+            npc.state = EntityState.GOING_TO_HOSPITAL
+            nearest_hospital = self.get_nearest_hospital(npc)
+            
+            if nearest_hospital:
+                # If path is empty or we need a new path, calculate it
+                if not npc.path or npc.target != (nearest_hospital.x, nearest_hospital.y):
+                    npc.target = (nearest_hospital.x, nearest_hospital.y)
+                    npc.path = self.bfs_pathfinding(npc.x, npc.y, nearest_hospital.x, nearest_hospital.y)
+                
+                # If we have a path, follow it using seek behavior
+                if npc.path:
+                    # Get the next waypoint
+                    next_waypoint = npc.path[0]
+                    
+                    # Apply seek behavior
+                    npc.seek(next_waypoint)
+                    
+                    # Update position based on velocity
+                    npc.update_position()
+                    
+                    # Update physical position in grid
+                    new_pos = npc.update_position()
+                    if new_pos:
+                        new_x, new_y = new_pos
+                        
+                        # Check if the move is valid (not a building or player)
+                        if (0 <= new_x < self.grid_width and 
+                            0 <= new_y < self.grid_height and 
+                            self.grid[new_x][new_y] != EntityType.BUILDING and
+                            self.grid[new_x][new_y] != EntityType.PLAYER):
+                            
+                            # Update grid
+                            self.grid[npc.x][npc.y] = EntityType.EMPTY
+                            npc.x, npc.y = new_x, new_y
+                            
+                            # If we've reached the next waypoint, remove it from the path
+                            if npc.x == npc.path[0][0] and npc.y == npc.path[0][1]:
+                                npc.path.pop(0)
+                            
+                            # Check if reached hospital
+                            if self.grid[npc.x][npc.y] == EntityType.HOSPITAL:
+                                print("Wosil")
+                                npc.carrying_victim = False
+                                self.rescued_count += 1
+                                npc.path = []  # Clear the path
+                                npc.state = EntityState.GOING_TO_VICTIM
+                            old_cell_type = self.grid[npc.x][npc.y]
+                            is_on_hospital = old_cell_type == EntityType.HOSPITAL
+                            self.grid[npc.x][npc.y] = EntityType.EMPTY if not is_on_hospital else EntityType.HOSPITAL
+
+                            # Then at the end, update the check for reaching hospital
+                            original_cell_type = self.grid[new_x][new_y]
+                            is_hospital = original_cell_type == EntityType.HOSPITAL
+
+                            # Check if reached hospital
+                            if is_hospital:
+                                npc.carrying_victim = False
+                                self.rescued_count += 1
+                                npc.path = []  # Clear the path
+                                npc.state = EntityState.GOING_TO_VICTIM
+                            self.grid[npc.x][npc.y] = EntityType.NPC
         else:
-            status = "Mission: Take victim to hospital"
-        text = self.font.render(status, True, BLUE)
-        screen.blit(text, (WIDTH - 350, 10))
+            # Set state to looking for victims
+            npc.state = EntityState.GOING_TO_VICTIM
+            
+            # Find nearest victim and move towards it
+            nearest_victim = self.get_nearest_victim(npc)
+            
+            if nearest_victim:
+                # If path is empty or we need a new path, calculate it
+                if not npc.path or npc.target != (nearest_victim.x, nearest_victim.y):
+                    npc.target = (nearest_victim.x, nearest_victim.y)
+                    npc.path = self.bfs_pathfinding(npc.x, npc.y, nearest_victim.x, nearest_victim.y)
+                
+                # If we have a path, follow it using seek behavior
+                if npc.path:
+                    # Get the next waypoint
+                    next_waypoint = npc.path[0]
+                    
+                    # Apply seek behavior
+                    npc.seek(next_waypoint)
+                    
+                    # Update physical position in grid
+                    new_pos = npc.update_position()
+                    if new_pos:
+                        new_x, new_y = new_pos
+                        
+                        # Check if the move is valid (not a building or player)
+                        if (0 <= new_x < self.grid_width and 
+                            0 <= new_y < self.grid_height and 
+                            self.grid[new_x][new_y] != EntityType.BUILDING and
+                            self.grid[new_x][new_y] != EntityType.PLAYER):
+                            
+                            # Update grid
+                            self.grid[npc.x][npc.y] = EntityType.EMPTY
+                            npc.x, npc.y = new_x, new_y
+                            
+                            # If we've reached the next waypoint, remove it from the path
+                            if npc.x == npc.path[0][0] and npc.y == npc.path[0][1]:
+                                npc.path.pop(0)
+                            
+                            # Check if reached victim
+                            if not npc.carrying_victim:
+                                for i, victim in enumerate(self.victims):
+                                    if victim.x == npc.x and victim.y == npc.y:
+                                        npc.carrying_victim = True
+                                        self.victims.pop(i)
+                                        npc.path = []  # Clear the path
+                                        npc.state = EntityState.GOING_TO_HOSPITAL
+                                        break
+                            
+                            self.grid[npc.x][npc.y] = EntityType.NPC
         
-        # Check win condition
-        if remaining == 0:
-            win_text = self.font.render('All victims rescued! Mission complete!', True, GREEN)
-            win_rect = win_text.get_rect(center=(WIDTH//2, HEIGHT//2))
-            pygame.draw.rect(screen, BLACK, win_rect.inflate(20, 20))
-            pygame.draw.rect(screen, GREEN, win_rect.inflate(20, 20), 2)
-            screen.blit(win_text, win_rect)
-
+    def move_player(self, dx, dy):
+        # Calculate new position
+        new_x = self.player.x + dx
+        new_y = self.player.y + dy
+        
+        # Check if the new position is valid
+        if (0 <= new_x < self.grid_width and 0 <= new_y < self.grid_height and
+            self.grid[new_x][new_y] != EntityType.BUILDING and
+            self.grid[new_x][new_y] != EntityType.NPC):
+            
+            # Check if destination is a hospital
+            is_destination_hospital = self.grid[new_x][new_y] == EntityType.HOSPITAL
+            
+            # Check if current position is a hospital
+            is_current_hospital = False
+            for hospital in self.hospitals:
+                if hospital.x == self.player.x and hospital.y == self.player.y:
+                    is_current_hospital = True
+                    break
+            
+            # Update grid - restore hospital if player is leaving one
+            if is_current_hospital:
+                self.grid[self.player.x][self.player.y] = EntityType.HOSPITAL
+            else:
+                self.grid[self.player.x][self.player.y] = EntityType.EMPTY
+            
+            # Update player position
+            self.player.x, self.player.y = new_x, new_y
+            
+            # Check if player reached a victim
+            if not self.player.carrying_victim:
+                for i, victim in enumerate(self.victims):
+                    if victim.x == self.player.x and victim.y == self.player.y:
+                        self.player.carrying_victim = True
+                        self.victims.pop(i)
+                        break
+            
+            # Check if player reached a hospital with a victim
+            if self.player.carrying_victim and is_destination_hospital:
+                self.player.carrying_victim = False
+                self.rescued_count += 1
+            
+            # Update grid with new player position
+            self.grid[self.player.x][self.player.y] = EntityType.PLAYER
+    
+    def handle_events(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            
+            # Keyboard control for player
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_UP:
+                    self.move_player(0, -1)
+                elif event.key == pygame.K_DOWN:
+                    self.move_player(0, 1)
+                elif event.key == pygame.K_LEFT:
+                    self.move_player(-1, 0)
+                elif event.key == pygame.K_RIGHT:
+                    self.move_player(1, 0)
+    
+    def update(self):
+        # Update NPC
+        self.update_npc()
+        
+        # Check if game is over (all victims rescued)
+        if self.rescued_count == self.total_victims:
+            print("All victims rescued! Game over.")
+            self.running = False
+    
+    def draw(self):
+        # Fill screen with black
+        self.screen.fill(BLACK)
+        
+        # Draw grid lines
+        for x in range(0, SCREEN_WIDTH, GRID_SIZE):
+            pygame.draw.line(self.screen, (50, 50, 50), (x, 0), (x, SCREEN_HEIGHT))
+        for y in range(0, SCREEN_HEIGHT, GRID_SIZE):
+            pygame.draw.line(self.screen, (50, 50, 50), (0, y), (SCREEN_WIDTH, y))
+        
+        # Draw buildings
+        for building in self.buildings:
+            building.draw(self.screen)
+        
+        # Draw hospitals
+        for hospital in self.hospitals:
+            hospital.draw(self.screen)
+        
+        # Draw victims
+        for victim in self.victims:
+            victim.draw(self.screen)
+        
+        # Draw NPC
+        self.npc.draw(self.screen)
+        
+        # Draw player
+        self.player.draw(self.screen)
+        
+        # Display rescue counter
+        font = pygame.font.SysFont(None, 30)
+        text = font.render(f"Rescued: {self.rescued_count}/{self.total_victims}", True, WHITE)
+        self.screen.blit(text, (10, 10))
+        
+        # Update display
+        pygame.display.flip()
+    
     def run(self):
-        running = True
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-
+        while self.running:
+            self.clock.tick(8)  # Reduced FPS for easier control
+            self.handle_events()
             self.update()
             self.draw()
+        
+        # Show game over message
+        if self.rescued_count == self.total_victims:
+            self.screen.fill(BLACK)
+            font = pygame.font.SysFont(None, 48)
+            game_over_text = font.render("All Victims Rescued!", True, WHITE)
+            text_rect = game_over_text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2))
+            self.screen.blit(game_over_text, text_rect)
+            
             pygame.display.flip()
-            clock.tick(60)
+            # Wait for a few seconds before quitting
+            pygame.time.wait(3000)
+        
+        pygame.quit()
 
-if __name__ == "__main__":
+# Main function
+def main():
     game = Game()
     game.run()
+
+if __name__ == "__main__":
+    main()
