@@ -69,14 +69,12 @@ class Entity:
         
         self.apply_force(steering)
 
-    # Add this method to your Entity class
     def apply_force(self, force):
         """Apply a force to the entity, updating its velocity"""
         self.velocity += force
         if self.velocity.length() > self.max_speed:
             self.velocity = normalize(self.velocity) * self.max_speed
 
-    # Add this method to your Entity class
     def update_position(self):
         """Update entity position based on velocity"""
         self.position += self.velocity
